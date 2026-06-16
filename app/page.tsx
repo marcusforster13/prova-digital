@@ -11,7 +11,6 @@ import {
   blobToBase64,
   base64ToBlob,
 } from '@/lib/utils';
-import { buildReportPdf } from '@/lib/pdf';
 
 type CertResult = {
   certificate: any;
@@ -207,7 +206,22 @@ export default function Home() {
       zip.file(`${fileName}.ots`, otsBytes);
     }
 
-    const reportBlob = buildReportPdf(result, fileName, hash);
+    let reportBlob: Blob;
+    try {
+      const { buildReportPdf } = await import('@/lib/pdf');
+      reportBlob = buildReportPdf(result, fileName, hash);
+    } catch (pdfErr) {
+      // fallback: texto simples se o PDF falhar
+      reportBlob = new Blob(
+        [`RELATÓRIO DE EVIDÊNCIA DIGITAL\n\nArquivo: ${fileName}\nHash SHA-256: ${hash}\nServidor: ${result.certificate.server.receivedAt}\nIP: ${result.certificate.server.ip}\nAssinatura: ${result.signature}`],
+        { type: 'text/plain' }
+      );
+      zip.file('relatorio.txt', reportBlob);
+      const content = await zip.generateAsync({ type: 'blob' });
+      saveAs(content, `evidencia-${Date.now()}.zip`);
+      setLoading(false);
+      return;
+    }
     zip.file('relatorio.pdf', reportBlob);
 
     const content = await zip.generateAsync({ type: 'blob' });
