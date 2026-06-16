@@ -8,7 +8,10 @@ import {
   getClientMetadata,
   getGeolocation,
   formatBytes,
+  blobToBase64,
+  base64ToBlob,
 } from '@/lib/utils';
+import { buildReportPdf } from '@/lib/pdf';
 
 type CertResult = {
   certificate: any;
@@ -32,6 +35,18 @@ export default function Home() {
   const [result, setResult] = useState<CertResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // ---------- Atualização (upgrade) de carimbo .ots existente ----------
+  const otsInputRef = useRef<HTMLInputElement>(null);
+  const [otsFileName, setOtsFileName] = useState<string | null>(null);
+  const [upgradeLoading, setUpgradeLoading] = useState(false);
+  const [upgradeError, setUpgradeError] = useState<string | null>(null);
+  const [upgradeResult, setUpgradeResult] = useState<{
+    ots: string;
+    complete: boolean;
+    changed: boolean;
+    message: string;
+  } | null>(null);
 
   function stopStream() {
     stream?.getTracks().forEach((t) => t.stop());
@@ -192,11 +207,46 @@ export default function Home() {
       zip.file(`${fileName}.ots`, otsBytes);
     }
 
-    const report = buildReadableReport(result, fileName, hash);
-    zip.file('relatorio.txt', report);
+    const reportBlob = buildReportPdf(result, fileName, hash);
+    zip.file('relatorio.pdf', reportBlob);
 
     const content = await zip.generateAsync({ type: 'blob' });
     saveAs(content, `evidencia-${Date.now()}.zip`);
+  }
+
+  // ---------- ATUALIZAR (UPGRADE) UM .ots EXISTENTE ----------
+  async function handleOtsFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUpgradeError(null);
+    setUpgradeResult(null);
+    setOtsFileName(file.name);
+    setUpgradeLoading(true);
+    try {
+      const base64 = await blobToBase64(file);
+      const res = await fetch('/api/upgrade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ otsBase64: base64 }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Erro ${res.status}`);
+      }
+      const data = await res.json();
+      setUpgradeResult(data);
+    } catch (err: any) {
+      setUpgradeError('Erro ao atualizar carimbo: ' + err.message);
+    } finally {
+      setUpgradeLoading(false);
+      e.target.value = '';
+    }
+  }
+
+  function handleDownloadUpgradedOts() {
+    if (!upgradeResult || !otsFileName) return;
+    const blob = base64ToBlob(upgradeResult.ots);
+    saveAs(blob, otsFileName);
   }
 
   return (
@@ -355,41 +405,67 @@ export default function Home() {
           )}
         </section>
       )}
+
+      {/* Seção independente: atualizar carimbo .ots depois da confirmação na blockchain */}
+      <section className="mt-10 border-t border-slate-200 pt-6">
+        <h2 className="text-lg font-semibold text-ink">
+          Já tenho um certificado — atualizar carimbo de tempo
+        </h2>
+        <p className="mt-1 text-sm text-slate-600">
+          Se a confirmação na blockchain do Bitcoin já passou (geralmente
+          algumas horas após a certificação), envie aqui o arquivo{' '}
+          <code className="text-xs bg-slate-100 px-1 rounded">.ots</code>{' '}
+          que estava dentro do seu pacote de evidência para obter a versão
+          atualizada e completa.
+        </p>
+
+        <div className="mt-3">
+          <button
+            onClick={() => otsInputRef.current?.click()}
+            disabled={upgradeLoading}
+            className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"
+          >
+            {upgradeLoading ? 'Verificando...' : 'Selecionar arquivo .ots'}
+          </button>
+          <input
+            ref={otsInputRef}
+            type="file"
+            accept=".ots"
+            className="hidden"
+            onChange={handleOtsFileChange}
+          />
+          {otsFileName && (
+            <span className="ml-2 text-xs text-slate-500">{otsFileName}</span>
+          )}
+        </div>
+
+        {upgradeError && (
+          <div className="mt-3 rounded-md bg-red-50 p-3 text-sm text-red-700 border border-red-200">
+            {upgradeError}
+          </div>
+        )}
+
+        {upgradeResult && (
+          <div
+            className={`mt-3 rounded-md border p-4 text-sm space-y-2 ${
+              upgradeResult.complete
+                ? 'border-green-200 bg-green-50'
+                : 'border-amber-200 bg-amber-50'
+            }`}
+          >
+            <div className="font-semibold">
+              {upgradeResult.complete ? '✅ Confirmado na blockchain' : '⏳ Ainda pendente'}
+            </div>
+            <div>{upgradeResult.message}</div>
+            <button
+              onClick={handleDownloadUpgradedOts}
+              className="mt-1 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+            >
+              Baixar .ots atualizado
+            </button>
+          </div>
+        )}
+      </section>
     </main>
   );
-}
-
-function buildReadableReport(result: CertResult, fileName: string, hash: string | null) {
-  const c = result.certificate;
-  return `RELATÓRIO DE EVIDÊNCIA DIGITAL
-================================
-
-Arquivo: ${fileName}
-Hash SHA-256: ${hash}
-
-Recebido pelo servidor em: ${c.server.receivedAt}
-IP de origem: ${c.server.ip}
-
-Assinatura HMAC-SHA256 do certificado: ${result.signature}
-
-Carimbo de tempo OpenTimestamps anexado: ${result.ots ? 'Sim (arquivo .ots incluído neste pacote)' : 'Não'}
-
-Metadados do dispositivo/cliente:
-${JSON.stringify(c.client, null, 2)}
-
-Geolocalização:
-${JSON.stringify(c.geolocation, null, 2)}
-
-EXIF (se disponível):
-${JSON.stringify(c.exif, null, 2)}
-
----
-Como verificar este pacote:
-1. Recalcule o SHA-256 do arquivo "${fileName}" e confira se bate com o hash acima.
-2. Use o arquivo .ots (se presente) em https://opentimestamps.org/ para
-   verificar o carimbo de tempo na blockchain do Bitcoin.
-3. A assinatura HMAC comprova que o "certificado.json" não foi alterado
-   após emitido pelo servidor (verificação requer a chave SIGNING_SECRET,
-   guardada apenas pelo operador do site).
-`;
 }
