@@ -42,7 +42,14 @@ export default function Home() {
     try {
       const s = await navigator.mediaDevices.getDisplayMedia({ video: { displaySurface: 'monitor' } as any });
       setStream(s); setMode('screen');
-      if (videoRef.current) { videoRef.current.srcObject = s; await videoRef.current.play(); }
+      if (videoRef.current) {
+        videoRef.current.srcObject = s;
+        await new Promise<void>(resolve => {
+          if (!videoRef.current) return resolve();
+          videoRef.current.onloadedmetadata = () => resolve();
+        });
+        await videoRef.current.play();
+      }
     } catch (err: any) { setError('Não foi possível iniciar a captura de tela: ' + err.message); }
   }
 
@@ -51,19 +58,38 @@ export default function Home() {
     try {
       const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
       setStream(s); setMode('camera');
-      if (videoRef.current) { videoRef.current.srcObject = s; await videoRef.current.play(); }
+      if (videoRef.current) {
+        videoRef.current.srcObject = s;
+        await new Promise<void>(resolve => {
+          if (!videoRef.current) return resolve();
+          videoRef.current.onloadedmetadata = () => resolve();
+        });
+        await videoRef.current.play();
+      }
     } catch (err: any) { setError('Não foi possível acessar a câmera: ' + err.message); }
   }
 
   async function captureFrame() {
-    const video = videoRef.current; const canvas = canvasRef.current; if (!video || !canvas) return;
+    const video = videoRef.current; const canvas = canvasRef.current;
+    if (!video || !canvas) { setError('Erro interno: elementos de vídeo não encontrados.'); return; }
+    if (!video.videoWidth || !video.videoHeight) {
+      setError('A imagem da tela ainda não carregou. Aguarde um instante e tente capturar novamente.');
+      return;
+    }
     canvas.width = video.videoWidth; canvas.height = video.videoHeight;
-    canvas.getContext('2d')?.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) { setError('Erro interno: não foi possível acessar o canvas.'); return; }
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     canvas.toBlob(async b => {
-      if (!b) return;
-      setBlob(b); setPreviewUrl(URL.createObjectURL(b));
-      setFileName(mode === 'screen' ? 'print-evidencia.png' : 'foto-evidencia.png');
+      if (!b) { setError('Não foi possível gerar a imagem capturada. Tente novamente.'); return; }
+      const capturedFileName = mode === 'screen' ? 'print-evidencia.png' : 'foto-evidencia.png';
+      const url = URL.createObjectURL(b);
+      setError(null);
+      setFileName(capturedFileName);
+      setPreviewUrl(url);
+      setBlob(b);
       stopStream();
+      setMode('idle');
       try { const exifr = await import('exifr'); setExifData(await exifr.parse(b) || null); } catch { setExifData(null); }
     }, 'image/png');
   }
@@ -181,6 +207,7 @@ export default function Home() {
 
           {(mode==='screen'||mode==='camera') && !blob && (
             <div style={{marginBottom:'1.25rem'}}>
+              {error && <div className="pd-alert error" style={{marginBottom:'10px'}}>{error}</div>}
               <video ref={videoRef} style={{width:'100%',borderRadius:'14px',border:'1px solid var(--border)',background:'#000'}} muted playsInline/>
               <div style={{display:'flex',gap:'8px',marginTop:'12px'}}>
                 <button className="pd-btn-primary" onClick={captureFrame}>Capturar agora</button>
